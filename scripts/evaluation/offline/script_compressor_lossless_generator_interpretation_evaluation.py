@@ -1,0 +1,1920 @@
+#!/usr/bin/python3
+#-*-coding: utf-8-*-
+
+#############################################
+# IMPORTATIONS
+#############################################
+
+# Garbage collector
+import gc
+
+# Others
+import sys
+
+# Linear algebra and data processing
+import numpy as np
+import pandas as pd
+import math
+import random
+
+# Get version
+from platform import python_version
+import sklearn
+import tensorflow as tf
+
+# Sklearn
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.manifold import TSNE
+from sklearn import preprocessing
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+
+# Tensorflow
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.datasets import cifar10
+
+# Numba
+from numba import jit
+
+# Time measure
+import datetime
+
+# Multiprocessing
+from multiprocessing import Pool
+import multiprocessing as mp
+
+
+#############################################
+# SET PARAMETERS
+#############################################
+
+
+
+RESULTS_DIR = "RESULTS/INTERPRETATION/"
+MODELS_DIR = "MODELS/INTERPRETATION/"
+MAIN_DIR = "./DATA/"
+
+# Set keras types
+tf.keras.backend.set_floatx('float64')
+
+# Context
+LOOK_BACK_CONTEXT = 1 # On rajoute +1 car on prend le dernier paquet comme paquet à compresser...
+LOOK_AHEAD_CONTEXT = 1 #TIMESTEPS
+CONTEXT_SIZE = LOOK_BACK_CONTEXT # Nombre timesteps sur les contexts
+CONTEXT_OUTPUT_SIZE = 30 #0 # Size of contexte in model layer
+# De preference < 128 car c'est la taille de la
+# couche GRU avant
+
+# Packet
+LOOK_BACK_PACKET = 8
+LOOK_AHEAD_PACKET = 1
+NUM_SIN = 8
+NUM_FEATS = NUM_SIN + 1
+
+# Learning parameters
+SHUFFLE = False # For test generator
+ALPHABET_SIZE = 2
+BATCH_SIZE = 1 # For test generator
+
+# Size added to header_length IN BYTES
+EXTRA_SIZE = 0
+CUSTOM_SIZE = 100 # Take the lead if extra size is define
+CHECKSUM = True # True = Keep Checksum
+
+# Generated dataset parameters
+MAX_PACKET_RANK = 3 # Max rank support for packet
+NB_BITS = 16*2 # Multiple for field inversion
+NB_ROWS = 2000*MAX_PACKET_RANK # Multiple for the flow id NB_ROWS = x * MAX_PACKET_RANK
+MODE_DATASET = "inversion" # "random", "checksum", "checksum34", "fixed", "inversion", "counter", "fixed_flow", "combinaison"
+LEFT_PADDING = True # Padding dataset
+
+
+# For evaluation parallelisation
+BATCH_PACKET = 1
+
+
+# Name
+# min(LOOK_BACK_CONTEXT, CONTEXT_OUTPUT_SIZE) if CONTEXT_OUTPUT_SIZE == 0
+# else LOOK_BACK_CONTEXT == 1 or 2 or 3 or 4...etc
+# easy to set LOOK_BACK_CONTEXT == 0
+FULL_NAME = f"LOSSLESS_CONTEXT{min(LOOK_BACK_CONTEXT, CONTEXT_OUTPUT_SIZE)}_PACKET{LOOK_BACK_PACKET}_SIN{NUM_SIN}"
+
+
+# Name
+if (CHECKSUM):
+
+    if (CUSTOM_SIZE is not None):
+        EXT_NAME = f"_WITH_CHECKSUM_CUSTOM_SIZE{CUSTOM_SIZE}_MODE_DATASET{MODE_DATASET}"
+    else:
+        EXT_NAME = f"_WITH_CHECKSUM_EXTRA_SIZE{EXTRA_SIZE}_MODE_DATASET{MODE_DATASET}"
+
+else:
+
+    if (CUSTOM_SIZE is not None):
+        EXT_NAME = f"_CUSTOM_SIZE{CUSTOM_SIZE}_MODE_DATASET{MODE_DATASET}"
+    else:
+        EXT_NAME = f"_EXTRA_SIZE{EXTRA_SIZE}_MODE_DATASET{MODE_DATASET}"
+
+
+# If padding on dataset
+if (LEFT_PADDING):
+    EXT_NAME += f"_LEFT_PADDING"
+
+
+print(f"MODEL : {FULL_NAME}{EXT_NAME}")
+
+# Set the Seed for numpy random choice
+np.random.seed(42)
+
+
+
+#############################################
+# USEFULL CLASS/FUNCTIONS
+#############################################
+
+class ArithmeticCoderBase(object):
+    
+    # Constructs an arithmetic coder, which initializes the code range.
+    def __init__(self, statesize):
+        
+        self.STATE_SIZE = statesize
+        self.MAX_RANGE = 1 << self.STATE_SIZE
+        self.MIN_RANGE = (self.MAX_RANGE >> 2) + 2
+        self.MAX_TOTAL = self.MIN_RANGE
+        self.MASK = self.MAX_RANGE - 1
+        self.TOP_MASK = self.MAX_RANGE >> 1
+        self.SECOND_MASK = self.TOP_MASK >> 1
+        
+        self.low = 0
+        self.high = self.MASK
+
+    def update(self,  cumul, symbol):
+        # State check
+        low = self.low
+        high = self.high
+        range_value = high - low + 1
+            
+        # Frequency table values check
+        total = cumul[-1].item() #np.asscalar(cumul[-1])
+        symlow = cumul[symbol].item() #np.asscalar(cumul[symbol])
+        symhigh = cumul[symbol+1].item() #np.asscalar(cumul[symbol+1])
+        
+        # Update range
+        newlow  = low + symlow  * range_value // total
+        newhigh = low + symhigh * range_value // total - 1
+        self.low = newlow
+        self.high = newhigh
+        # While the highest bits are equal
+        while ((self.low ^ self.high) & self.TOP_MASK) == 0:
+            self.shift()
+            self.low = (self.low << 1) & self.MASK
+            self.high = ((self.high << 1) & self.MASK) | 1
+        
+        # While the second highest bit of low is 1 and the second highest bit of high is 0
+        while (self.low & ~self.high & self.SECOND_MASK) != 0:
+            self.underflow()
+            self.low = (self.low << 1) & (self.MASK >> 1)
+            self.high = ((self.high << 1) & (self.MASK >> 1)) | self.TOP_MASK | 1
+    
+    def shift(self):
+        raise NotImplementedError()
+    
+    def underflow(self):
+        raise NotImplementedError()
+        
+class ArithmeticEncoder(ArithmeticCoderBase):
+    
+    def __init__(self, statesize, bitout,
+                 write_mode=False):
+        super(ArithmeticEncoder, self).__init__(statesize)
+        self.output = bitout
+        self.write_mode = write_mode
+        self.num_underflow = 0
+        self.data_compress = []
+    
+    def write(self, cumul, symbol):
+        self.update(cumul, symbol)
+    
+    def finish(self):
+        if (self.write_mode):
+            self.output.write(1)
+        #else:
+        #    self.data_compress.append(1)
+            
+    
+    def shift(self):
+        bit = self.low >> (self.STATE_SIZE - 1)
+        if (self.write_mode):
+            self.output.write(bit)
+        else:
+            self.data_compress.append(bit)
+        
+        # Write out the saved underflow bits
+        for _ in range(self.num_underflow):
+            if (self.write_mode):
+                self.output.write(bit ^ 1)
+            else:
+                self.data_compress.append(bit ^ 1)
+        self.num_underflow = 0
+    
+    def underflow(self):
+        self.num_underflow += 1
+
+
+class ArithmeticDecoder(ArithmeticCoderBase):
+    
+    def __init__(self, statesize, bitin, 
+                 data_compress, 
+                 write_mode=False):
+        super(ArithmeticDecoder, self).__init__(statesize)
+        # The underlying bit input stream.
+        self.input = bitin
+        self.data_compress = data_compress
+        self.data_compress.append(1) # Set the EOF here
+        # because we measure compression size at the end
+        self.data_decompress = []
+        self.rank = 0
+        self.write_mode = write_mode
+        # The current raw code bits being buffered, which is always in the range [low, high].
+        self.code = 0
+        self.temp_read = []
+        self.temp = []
+        for _ in range(self.STATE_SIZE):
+            self.code = self.code << 1 | self.read_code_bit()
+    
+    def read(self, cumul, alphabet_size):
+        
+        total = cumul[-1].item() #np.asscalar(cumul[-1])
+        range_value = self.high - self.low + 1
+        offset = self.code - self.low
+        value = ((offset + 1) * total - 1) // range_value
+        
+        start = 0
+        end = alphabet_size
+        while end - start > 1:
+            middle = (start + end) >> 1
+            if cumul[middle] > value:
+                end = middle
+            else:
+                start = middle
+        
+        symbol = start
+
+        self.update(cumul, symbol)
+        self.data_decompress.append(symbol)
+        return symbol
+    
+    
+    def shift(self):
+        self.code = ((self.code << 1) & self.MASK) | self.read_code_bit()
+        
+    def underflow(self):
+        self.code = (self.code & self.TOP_MASK) | ((self.code << 1) & (self.MASK >> 1)) | self.read_code_bit()
+    
+    def read_code_bit(self):
+        if (self.write_mode):
+            temp = self.input.read()
+        else:
+            try:
+                temp = self.data_compress[self.rank]
+            except Exception as e:
+                temp = -1
+            self.rank += 1
+        self.temp.append(temp)
+        if temp == -1:
+            temp = 0
+        return temp
+
+class BitInputStream(object):
+    
+    # Constructs a bit input stream based on the given byte input stream.
+    def __init__(self, inp):
+        self.input = inp
+        self.currentbyte = 0
+        self.numbitsremaining = 0
+
+    def read(self):
+        if self.currentbyte == -1:
+            return -1
+        if self.numbitsremaining == 0:
+            temp = self.input.read(1)
+            if len(temp) == 0:
+                self.currentbyte = -1
+                return -1
+            self.currentbyte = temp[0] if python3 else ord(temp)
+            self.numbitsremaining = 8
+        assert self.numbitsremaining > 0
+        self.numbitsremaining -= 1
+        return (self.currentbyte >> self.numbitsremaining) & 1
+    
+    def read_no_eof(self):
+        result = self.read()
+        if result != -1:
+            return result
+        else:
+            raise EOFError()
+    
+    def close(self):
+        self.input.close()
+        self.currentbyte = -1
+        self.numbitsremaining = 0
+
+
+class BitOutputStream(object):
+    
+    # Constructs a bit output stream based on the given byte output stream.
+    def __init__(self, out):
+        self.output = out  # The underlying byte stream to write to
+        self.currentbyte = 0  # The accumulated bits for the current byte, always in the range [0x00, 0xFF]
+        self.numbitsfilled = 0  # Number of accumulated bits in the current byte, always between 0 and 7 (inclusive)
+    
+    def write(self, b):
+        if b not in (0, 1):
+            raise ValueError("Argument must be 0 or 1")
+        self.currentbyte = (self.currentbyte << 1) | b
+        self.numbitsfilled += 1
+        if self.numbitsfilled == 8:
+            towrite = bytes((self.currentbyte,)) if python3 else chr(self.currentbyte)
+            self.output.write(towrite)
+            self.currentbyte = 0
+            self.numbitsfilled = 0
+
+    def close(self):
+        while self.numbitsfilled != 0:
+            self.write(0)
+        self.output.close()
+
+
+def standardize(x, min_x, max_x, a, b):
+  # x_new in [a, b]
+    x_new = (b - a) * ( (x - min_x) / (max_x - min_x) ) + a
+    return x_new
+
+
+def train_val_test_split(X, y, random_state, train_size=0, 
+                         val_size=0, test_size=0):
+    
+    # Prendre le cas de la stratification
+    # Prendre en cmpte la spération...
+    X = np.arange(0, X.shape[0])
+    y = np.arange(0, y.shape[0])
+    train_idx, val_idx, _, _ = sklearn.model_selection.train_test_split(X, y,
+                                random_state=random_state, test_size=1-train_size, 
+                                shuffle=True) # , stratify=y
+
+    # Get data test from val
+    X = X[val_idx]
+    y = y[val_idx]
+    val_idx, test_idx, _, _ = sklearn.model_selection.train_test_split(X, y,
+                                random_state=random_state, test_size=0.5, 
+                                shuffle=True)
+    
+    return train_idx, val_idx, test_idx
+
+
+def create_windows(data, window_shape, step = 1, start_id = None, end_id = None):
+    
+    data = np.asarray(data)
+    data = data.reshape(-1,1) if np.prod(data.shape) == max(data.shape) else data
+        
+    start_id = 0 if start_id is None else start_id
+    end_id = data.shape[0] if end_id is None else end_id
+    
+    data = data[int(start_id):int(end_id),:]
+    window_shape = (int(window_shape), data.shape[-1])
+    step = (int(step),) * data.ndim
+    slices = tuple(slice(None, None, st) for st in step)
+    indexing_strides = data[slices].strides
+    win_indices_shape = ((np.array(data.shape) - window_shape) // step) + 1
+    
+    new_shape = tuple(list(win_indices_shape) + list(window_shape))
+    strides = tuple(list(indexing_strides) + list(data.strides))
+    
+    window_data = np.lib.stride_tricks.as_strided(data, shape=new_shape, strides=strides)
+    
+    return np.squeeze(window_data, 1)
+
+
+def loss_fn(y_true, y_pred):
+    #return 1/np.log(2) * tf.keras.metrics.categorical_crossentropy(
+    #    y_true, y_pred)
+    return 1/np.log(2) * tf.keras.metrics.categorical_crossentropy(
+        y_true, y_pred)
+
+
+def build_model_embedding_lossless(
+    input_shape, output_shape, input_dim):
+    output_dim = int(output_shape**0.25)
+    
+    inputs = keras.Input(shape=input_shape)
+    
+    x = inputs # ADDITION DE header shape et context
+    embed = tf.keras.layers.Embedding(input_dim=input_dim, #output_shape,
+                                      output_dim=output_dim,
+                                      embeddings_initializer="uniform",
+                                      embeddings_regularizer=None,
+                                      activity_regularizer=None,
+                                      embeddings_constraint=None,
+                                      mask_zero=False,
+                                      input_length=input_shape[-1])
+    embed_output = embed(x)
+    
+    x = tf.keras.layers.Bidirectional(
+            tf.keras.layers.GRU(64, #output_dim, #input_shape[-1],
+                                activation='tanh', 
+                                return_sequences=False, 
+                                return_state=False))(embed_output)
+    x = layers.Dense(64, 
+                     activation=tf.keras.layers.LeakyReLU(alpha=0.1))(x)
+    x = layers.Dense(output_shape, 
+                     activation="softmax")(x)
+    model = keras.Model(inputs, x, name="model")
+    embedding_model = keras.Model(inputs, embed_output, name="embedding_model")
+    
+    return model, embedding_model
+
+
+class CompressorLossless(keras.Model):
+    def __init__(self, 
+                 encoder_context,
+                 ed_lossless,
+                 **kwargs):
+        super(CompressorLossless, self).__init__(**kwargs)
+        self.encoder_context = encoder_context
+        self.ed_lossless = ed_lossless
+        
+        self.loss_tracker = keras.metrics.Mean(name="loss")
+
+    @property
+    def metrics(self):
+        return [
+            self.loss_tracker,
+        ]
+
+    def call(self, data):
+        
+        inputs = data
+        context = data[0]
+        packet = data[1]
+        target = data[2]
+        packet = tf.cast(packet, tf.float64)
+        
+        x = self.encoder_context(context)
+        
+        x = tf.expand_dims(x, axis=1)
+        x = tf.repeat(x, LOOK_BACK_PACKET, axis=1)
+        
+        x = tf.concat([x, packet], axis=-1)
+        
+        x = self.ed_lossless(x)
+
+        loss_reconstruction = tf.reduce_sum(
+            keras.losses.binary_crossentropy(target, x),
+        )
+        loss = loss_reconstruction
+        
+        self.loss_tracker.update_state(loss)
+        
+        return x
+
+    def train_step(self, data):
+        if isinstance(data, tuple):
+            data = data[0]
+            
+        #print("[DEBUG][train_step] data : ", data)
+        
+        inputs = data
+        context = data[0]
+        packet = data[1]
+        target = data[2]
+        packet = tf.cast(packet, tf.float64)
+        
+        with tf.GradientTape() as tape:
+
+            x = self.encoder_context(context)
+            
+            x = tf.expand_dims(x, axis=1)
+            x = tf.repeat(x, LOOK_BACK_PACKET, axis=1) # shape_packet[1]
+            
+            x = tf.concat([x, packet], axis=-1)
+            
+            x = self.ed_lossless(x)
+            
+            loss_reconstruction = tf.reduce_sum(
+                keras.losses.binary_crossentropy(target, x)
+            )
+            loss = loss_reconstruction
+
+        grads = tape.gradient(loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+        
+        self.loss_tracker.update_state(loss)
+
+        return {
+            "tot": self.loss_tracker.result()
+        }
+
+
+def build_model_context_lossless(input_shape, output_size):
+    
+    encoder_inputs = keras.Input(shape=input_shape)
+    
+    x = encoder_inputs # ADDITION DE header shape et context
+    #x = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(
+    #        input_shape[-1], activation=tf.keras.layers.LeakyReLU(alpha=0.1)))(x)
+    x = tf.keras.layers.Bidirectional(
+            tf.keras.layers.GRU(128,
+                                activation='tanh', 
+                                return_sequences=False, 
+                                return_state=False))(x)
+    #x = layers.Flatten()(x)
+    x = layers.Dense(output_size, name="z", 
+                     activation=tf.keras.layers.LeakyReLU(alpha=0.1))(x)
+    encoder = keras.Model(encoder_inputs, x, name="encoder")
+    
+    return encoder
+
+
+def build_model_lossless(
+    input_shape, output_shape, input_dim):
+    
+    output_dim = int(output_shape**0.25)
+    
+    inputs = keras.Input(shape=input_shape) #_symbol
+    inputs_result = inputs #.values
+    
+    #print("[DEBUG][build_model_lossless] inputs_result shape : ", tf.shape(inputs_result))
+    
+    inputs_symbol = tf.slice(inputs_result, [0, 0, 0], [-1, -1, 1])
+    
+    #print("[DEBUG][build_model_lossless] inputs_symbol shape : ", tf.shape(inputs_symbol))
+    
+    inputs_symbol_shape = [k for k in tf.shape(inputs_symbol)]
+    inputs_symbol = tf.reshape(
+        inputs_symbol, [inputs_symbol_shape[0], inputs_symbol_shape[1]])
+    
+    #print("[DEBUG][build_model_lossless] inputs_symbol shape : ", tf.shape(inputs_symbol))
+    
+    inputs_sin = tf.slice(inputs_result, [0, 0, 1], [-1, -1, -1])
+
+    embed = tf.keras.layers.Embedding(input_dim=input_dim, #output_shape,
+                                      output_dim=output_dim,
+                                      embeddings_initializer="uniform",
+                                      embeddings_regularizer=None,
+                                      activity_regularizer=None,
+                                      embeddings_constraint=None,
+                                      mask_zero=False,
+                                      input_length=input_shape[-1])
+    embed_output = embed(inputs_symbol)
+    embed_output_shape = [k for k in tf.shape(embed_output)]
+    #print("embed_output_shape : ", embed_output_shape)
+    
+    x = tf.concat(
+        [embed_output, inputs_sin], axis=-1)
+    
+    x = tf.keras.layers.Bidirectional(
+            tf.keras.layers.GRU(32, #output_dim, #input_shape[-1],
+                                activation='tanh', 
+                                return_sequences=False, 
+                                return_state=False))(x)
+    x = layers.Dense(3, 
+                     activation=tf.keras.layers.LeakyReLU(alpha=0.1))(x)
+    x = layers.Dense(output_shape, 
+                     activation="softmax")(x)
+    model = keras.Model(inputs, x, name="model")
+    embedding_model = keras.Model(inputs, embed_output, name="embedding_model")
+    
+    return model, embedding_model
+
+
+def gen_sin(F, Fs, phi, A, mean, period, center):
+    T = (1/F)*period # Period if 10/F = 10 cycles
+    Ts = 1./Fs # Period sampling
+    N = int(T/Ts) # Number of samples
+    t = np.linspace(0, T, N)
+    signal = A*np.sin(2*np.pi*F*t + phi) + center
+    return signal
+
+
+def next_decompression_packet(
+                series, 
+                context,
+                header_length,
+                sin,
+                timesteps,
+                num_feats,
+                dec,
+                prob,
+                cumul,
+                i,
+                alphabet_size):
+
+    # Si ce n'est pas la première fois que l'on arrive
+    limit_size = header_length-timesteps
+    if (i != limit_size):
+        cumul[1:] = np.cumsum(prob*10000000 + 1)
+        series[i+timesteps] = dec.read(
+            cumul, alphabet_size)
+        
+        #if (PACKETS_GLOBAL[(i-1)+timesteps] != series[(i-1)+timesteps]):
+        #    print("[DEBUG][next_decompression_packet] series EXCEPTION : \n", 
+        #          series[:(i-1)+timesteps+1])
+        #    print("[DEBUG][next_decompression_packet] PACKETS_GLOBAL EXCEPTION : \n", 
+        #          PACKETS_GLOBAL[:(i-1)+timesteps+1])
+        #    raise Exception
+
+        i += 1
+        inputs_packet = series[
+            i:i+timesteps].reshape(-1, 1)
+        inputs_packet = np.concatenate(
+            (inputs_packet, sin[i:i+timesteps]), axis=-1)
+        inputs_packet = inputs_packet.reshape((1, -1, num_feats))
+        
+    if (i == limit_size):   
+        packet_decompress = series
+        return packet_decompress
+    
+    return series, inputs_packet, context, header_length, sin, \
+           timesteps, num_feats, dec, prob, cumul, i
+
+
+def init_decompression_packet(
+                packet, 
+                context,
+                header_length,
+                max_length,
+                alphabet_size,
+                timesteps):
+    
+    num_sin = 8
+    num_feats = num_sin+1
+    
+    # Generate sinusoide
+    sin = np.empty((max_length, 0), dtype=np.float64)
+    for j in range(1, num_sin+1):
+        sin_tmp = gen_sin(
+            F=j, Fs=max_length, phi=0, A=1, 
+            mean=0.5, period=j, center=0.5).reshape((max_length, 1))
+        sin = np.concatenate(
+            (sin, sin_tmp), axis=-1)
+    
+    series = np.zeros(header_length, dtype = np.uint8)
+    dec = ArithmeticDecoder(
+        32, bitin=None, 
+        data_compress=packet, 
+        write_mode=False)
+    
+    prob = np.ones(alphabet_size)/alphabet_size
+    cumul = np.zeros(alphabet_size+1, dtype=np.uint64)
+    cumul[1:] = np.cumsum(prob*10000000 + 1)
+    
+    i = 0
+    for k in range(min(timesteps, header_length)):
+        series[k] = dec.read(
+            cumul, alphabet_size)
+       
+    # Init first input !
+    inputs_packet = series[
+        :timesteps].reshape(-1, 1)
+    inputs_packet = np.concatenate(
+        (inputs_packet, sin[:timesteps]), axis=-1)
+    inputs_packet = inputs_packet.reshape(
+        (1, -1, num_feats))
+    #i += 1
+    i = 0
+      
+    return series, inputs_packet, context, header_length, sin, \
+          timesteps, num_feats, dec, prob, cumul, i
+
+
+def next_compression_packet(packet, 
+                            context,
+                            packet_target,
+                            header_length,
+                            timesteps,
+                            enc,
+                            prob,
+                            cumul,
+                            i):
+    
+    
+    y_original = int(np.argmax(
+        packet_target[i:i+1]))
+
+    cumul[1:] = np.cumsum(prob*10000000 + 1)
+    enc.write(cumul, y_original)
+    i += 1
+    
+    limit_size = header_length - timesteps
+    if (limit_size == i):   
+        enc.finish()
+        return enc.data_compress 
+    
+    return packet, context, packet_target, \
+            header_length, timesteps, enc, prob, cumul, i
+
+
+def init_compression_packet(packet, 
+                            context,
+                            packet_target,
+                            header_length,
+                            alphabet_size, 
+                            timesteps):    
+    i = 0 # Counter for loop
+    
+    enc = ArithmeticEncoder(
+        32, bitout=None, write_mode=False)
+    prob = np.ones(alphabet_size)/alphabet_size
+    cumul = np.zeros(
+        alphabet_size+1, dtype=np.uint64)
+    cumul[1:] = np.cumsum(
+        prob*10000000 + 1) 
+    
+    # Init with uniform law
+    for j in range(timesteps):
+        init_val = packet[
+            0, j, 0].astype(np.uint8)
+        enc.write(cumul, init_val) #X[0,j])
+        
+    return packet, context, packet_target, \
+            header_length, timesteps, enc, prob, cumul, i
+
+
+def run_parallel_compression_decompression(
+            params_compression, 
+            params_decompression,
+            packets,
+            look_back_packet,
+            alphabet_size):
+    
+    nb_packets = len(params_compression)
+    
+    states_compression = np.array([False] * nb_packets)
+    states_decompression = np.array([False] * nb_packets)
+    
+    rank_compression = np.arange(
+        0, nb_packets, dtype=np.int32)
+    checks_operation = [None] * nb_packets
+    
+    size_compress = [None] * nb_packets
+    size_decompress = [None] * nb_packets
+    
+    
+    with mp.Pool() as workers:
+        
+        params_compression = workers.starmap(
+            init_compression_packet, 
+            params_compression)
+        
+        # LOOP FOR COMPRESSION
+        # j = compteur de boucle
+        # k = compteur du rang du bit a encoder
+        while (not states_decompression.all()):
+            
+            for j in rank_compression:
+            
+                if (not states_compression[j]): 
+                    pkt, ctx, pkt_target, header_length, \
+                      timesteps, enc, prob, cumul, k = params_compression[j]
+
+                    limit_size = header_length - look_back_packet
+                    if (k < limit_size):
+                        #print("[DEBUG] ctx.shape: ", ctx.shape)
+                        #print("[DEBUG] pkt[k:k+1].shape: ", pkt[k:k+1].shape)
+                        prob = model.predict([ctx,
+                                              pkt[k:k+1], 
+                                              np.zeros((1, 2))], batch_size=1)
+                        # Set alphabet_size = 2 en variable !
+                        params_compression[j] = (pkt, ctx, 
+                                                 pkt_target,
+                                                 header_length, 
+                                                 timesteps,
+                                                 enc, prob, cumul, k)
+                        params_compression[j] = workers.starmap(
+                            next_compression_packet, (params_compression[j],))[0]
+                        k += 1 # If param compression is an packet compress
+                    
+                    if (k == limit_size): # On init la decompression
+                        states_compression[j] = True
+                        size_compress[j] = len(params_compression[j])
+                   
+                        params_decompression[j] = (params_compression[j],
+                                                   ctx,
+                                                   header_length,
+                                                   max_length,
+                                                   alphabet_size,
+                                                   look_back_packet)
+                        # Map compression
+                        params_decompression[j] = workers.starmap(
+                            init_decompression_packet, (params_decompression[j],))[0]
+             
+            # Drop values inside rank compression
+            # Update rank in function of evolution
+            rank_compression = np.arange( # Invert mask
+                0, nb_packets)[np.logical_not(states_compression)]
+            rank_decompression = np.arange(
+                0, nb_packets)[states_compression]        
+                    
+            # LOOP FOR DECOMPRESSION
+            for j in rank_decompression:
+                
+                if ((not states_decompression[j]) and states_compression[j]): 
+                    series, input_packet, ctx, header_length, sin, \
+                       timesteps, num_feats, dec, prob, cumul, k = params_decompression[j]
+
+                    limit_size = header_length - look_back_packet
+                    if (k < header_length):
+                        # Set alphabet_size = 2 en variable !
+                        prob = model.predict([ctx,
+                                              input_packet, 
+                                              np.zeros((1, 2))], batch_size=1)
+
+                        params_decompression[j] = (series, ctx,
+                                                   header_length, sin,
+                                                   timesteps, num_feats,
+                                                   dec, prob, cumul, k,
+                                                   alphabet_size)
+                        params_decompression[j] = workers.starmap(
+                            next_decompression_packet, 
+                            (params_decompression[j],))[0]
+                        k += 1 # If param compression is an packet compress
+
+                    if (k == limit_size):
+                        states_decompression[j] = True
+                        size_decompress[j] = len(params_decompression[j]) # Get the packet compress now !
+
+                        # Set packet 
+                        pkt = packets[j, :header_length] #context[j:j+1, -1, :header_length]
+                        check_operation =  pkt - params_decompression[j]
+                        condition_check_operation = (
+                            (1 in check_operation) or (-1 in check_operation))
+
+                        # Check is decompression == original
+                        if (condition_check_operation):
+                            checks_operation[j] = False 
+                        else:
+                            checks_operation[j] = True
+                            
+                            
+    return size_compress, size_decompress, checks_operation
+
+
+def compression(model,
+              packets,
+              packets_rank,
+              generator, 
+              headers_length,
+              max_length,
+              range_list_IDs,
+              look_back_context,
+              look_ahead_context,
+              look_back_packet,
+              look_ahead_packet,
+              num_sin,
+              alphabet_size,
+              left_padding):
+    
+    # Define data for results
+    df_results = pd.DataFrame()
+    checks_operation = []
+    size_compress = []
+    size_decompress = []
+    
+    # Pre fill list for parallel computing
+    params_compression = [None] * headers_length.shape[0]
+    params_decompression = [None] * headers_length.shape[0]
+        
+    states_compression = np.array([False] * headers_length.shape[0])
+    states_decompression = np.array([False] * headers_length.shape[0])
+    
+    rank_compression = np.arange(
+        0, headers_length.shape[0], dtype=np.int32)
+    checks_operation = [None] * headers_length.shape[0]
+    
+    size_compress = [None] * headers_length.shape[0]
+    size_decompress = [None] * headers_length.shape[0]
+    
+    # Index batch
+    idx_batch = 0
+    packets_original = [None] * headers_length.shape[0]
+    
+    # Extraction des packets
+    # et compression
+    for i in range(
+        range_list_IDs.shape[0]):
+        
+        start_idx, end_idx = \
+            range_list_IDs[i, 0], range_list_IDs[i, 1]
+        quantity = end_idx - start_idx # Check if good coverage !
+        
+        header_length = int(
+            headers_length[i]*8)
+        packets_original[i] = packets[i]
+        
+        # Init array
+        idx_tmp = 0
+        pkt_sin_seq = np.zeros(
+            (quantity, look_back_packet, num_sin+1))
+        
+        if (left_padding):
+            ctx_seq = np.zeros(
+                (1, look_back_context, 
+                 max_length-look_back_packet))
+        else:
+            ctx_seq = np.zeros(
+                (1, look_back_context, max_length))
+    
+        pkt_target = np.zeros(
+            (quantity, alphabet_size))
+        
+        for j in range(
+            start_idx, end_idx): #idx_batch, idx_batch+quantity): # Verifier le end_idx (inclue ou non ?)
+
+            # Get array
+            ctx_seq_tmp, pkt_sin_seq_tmp, \
+                pkt_target_tmp = generator \
+                    .__getitem__(index=j)
+            
+            # Set array to packet's array
+            pkt_sin_seq[idx_tmp:idx_tmp+1] = pkt_sin_seq_tmp
+            pkt_target[idx_tmp:idx_tmp+1] = pkt_target_tmp
+            idx_tmp += 1
+            
+        # On context is sufficient useless 
+        # to repear !
+        ctx_seq[0:1] = ctx_seq_tmp
+        idx_batch = idx_batch + quantity
+
+        # Array for params compression
+        params_compression[i] = (pkt_sin_seq,
+                                 ctx_seq,
+                                 pkt_target,
+                                 header_length,
+                                 alphabet_size,
+                                 look_back_packet)
+        
+    size_compress, size_decompress, checks_operation = \
+        run_parallel_compression_decompression(
+                params_compression=params_compression, 
+                params_decompression=params_decompression,
+                packets=packets,
+                look_back_packet=look_back_packet,
+                alphabet_size=alphabet_size)
+        
+    df_results['size_decompress'] = size_decompress
+    df_results['size_compress'] = size_compress
+    df_results['check_operation'] = checks_operation
+    df_results['headers_length'] = headers_length*8 # Transform to bit
+    df_results['packets_rank'] = packets_rank
+    
+    return df_results
+
+
+
+# GENERATOR UPDATE pour prendre la notion d'index
+# sans sequentialité !
+class DataGenerator(keras.utils.Sequence):
+    'Generates data for Keras'
+    def __init__(self, 
+                 list_IDs,
+                 
+                 look_back_context,
+                 look_ahead_context,
+                 look_back_packet,
+                 look_ahead_packet,
+                
+                 packets_rank,
+                 packets, 
+                 headers_length,
+                 max_length,
+                 
+                 indexes_packet,
+                 indexes_block,
+                 
+                 left_padding=False,
+                 batch_size=32,
+                 num_sin=8,
+                 alphabet_size=2, 
+                 shuffle=True):
+        'Initialization'
+        self.left_padding = left_padding
+        self.batch_size = batch_size
+        # Liste des index des packets (peut etre que les vals ou trains...)
+        self.list_IDs = list_IDs # Index de block !
+        self.shuffle = shuffle
+        self.on_epoch_end()
+        
+        # Identification data
+        #self.flows_id = flows_id
+        self.packets_rank = packets_rank
+        self.packets = packets
+        self.headers_length = headers_length
+        
+        # Parameters data
+        self.num_sin = num_sin
+        self.num_feats = self.num_sin + 1
+        self.alphabet_size = alphabet_size
+        self.max_length = max_length
+        
+        self.look_back_context = look_back_context
+        self.look_ahead_context = look_ahead_context
+        self.look_back_packet = look_back_packet
+        self.look_ahead_packet = look_ahead_packet
+        
+        # Generation des indexes
+        nb_batch_block_min = (((self.headers_length*8) - 
+                              self.look_back_packet) // self.batch_size) * self.batch_size
+        nb_batch_block_max = ((self.headers_length*8) - 
+                             self.look_back_packet)
+        nb_batch_block = np.maximum(nb_batch_block_min, nb_batch_block_max)
+        self.indexes_max_packet = np.cumsum(nb_batch_block)
+        self.indexes_min_packet = np.concatenate((np.zeros(1),
+                                                  self.indexes_max_packet[0:-1]))
+        self.indexes_max_packet = self.indexes_max_packet - 1
+        
+        # Indexes packet and block pre computed !
+        self.indexes_packet = indexes_packet
+        self.indexes_block = indexes_block
+        
+        # Generate sinusoide
+        self.sin = np.empty((self.max_length, 0), dtype=np.float64)
+        for j in range(1, self.num_sin+1):
+            sin_tmp = self.__gen_sin(
+                F=j, Fs=self.max_length, phi=0, A=1, 
+                mean=0.5, period=j, center=0.5).reshape((self.max_length, 1))
+            self.sin = np.concatenate((self.sin, sin_tmp), axis=-1)    
+        self.sin_seq = create_windows(
+            self.sin, window_shape=self.look_back_packet, 
+            end_id=-self.look_ahead_packet)
+        
+        
+    def __gen_sin(self, F, Fs, phi, A, mean, period, center):
+        T = (1/F)*period # Period if 10/F = 10 cycles
+        Ts = 1./Fs # Period sampling
+        N = int(T/Ts) # Number of samples
+        t = np.linspace(0, T, N)
+        signal = A*np.sin(2*np.pi*F*t + phi) + center
+        return signal
+
+    
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(np.floor(
+            (self.list_IDs.size /  self.batch_size)))
+
+    
+    # /!\ A adapter en fonction de la look_ahead_packet 
+    # (par default on dit quel est a UN !)
+    def __compute_batch_quantity(self, indexes_packet):
+        #(self.headers_length[indexes_packet].sum() * 8)
+        pkts_size = (self.headers_length[
+            indexes_packet].sum() * 8)
+        pkts_size_cut = pkts_size - \
+            (indexes_packet.shape[0]*self.look_back_packet)
+        return pkts_size_cut # / self.batch_size)
+    
+
+    def __getitem__(
+        self, index):
+        'Generate one batch of data'
+        # On met à jour l'index avec le coté random !
+        
+        # Get index of block
+        index_start = self.indexes[
+            index] * self.batch_size
+        index_end = index_start + self.batch_size
+        
+        # Get indexes packet and block
+        indexes_packet = self.indexes_packet[
+            index_start:index_end]
+        indexes_block = self.indexes_block[
+            index_start:index_end]
+        
+        # On prend le min et on ajoute !
+        # On récupère les données
+        ctx, pkt, y = self.__data_generation(
+                indexes_packet, indexes_block)
+        
+        if (self.left_padding):
+            return [ctx[:, :, self.look_back_packet:], pkt, y]
+        else:
+            return [ctx, pkt, y]
+
+    
+    def on_epoch_end(self):
+        'Updates indexes after each epoch'
+        # On manipule des indexes de block !
+        self.indexes = np.arange(
+            np.floor(len(self.list_IDs)/self.batch_size)) \
+            .astype(int)
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+            
+            
+    def __get_context(
+        self, indexes_packet):
+        
+        ctx = np.zeros(
+            (indexes_packet.size, 
+             self.look_back_context, 
+             self.max_length))
+        
+        for i in range(ctx.shape[0]):
+            rank = indexes_packet[i] #list_IDs[i]
+            
+            pad_size = max(0, self.look_back_context - \
+                self.packets_rank[rank])
+            
+            pkt_size = self.look_back_context - \
+                pad_size
+            
+            ctx_tmp = np.concatenate(
+                    (np.zeros((pad_size, self.max_length)), 
+                     self.packets[rank-pkt_size:rank]), axis=0)
+            
+            ctx_tmp = ctx_tmp.reshape(
+                1, self.look_back_context, -1)
+                
+            ctx[i] = ctx_tmp
+        
+        # Repeat le contexte en fonction de la header length
+        nbs_repeat = ((self.headers_length[indexes_packet]*8) - \
+              self.look_back_packet).astype(int)
+        ctx_seq = np.repeat(ctx, nbs_repeat, axis=0)
+        
+        return ctx_seq
+    
+    
+    def __get_packet(self, 
+                     indexes_packet, 
+                     indexes_block):
+        # En fonction de la taille de batch size il faut 
+        # penser à recupere un ou plusieurs paquets !
+        
+        #nb_repeat = ((self.headers_length[indexes_packet]*8) - \
+        #      self.look_back_packet).sum().astype(int) #[0]
+        nb_repeat = indexes_block.size
+        
+        pkt_seq = np.zeros(
+            (nb_repeat, self.look_back_packet, 
+             self.num_feats))
+        
+        y_seq = np.zeros(
+            (nb_repeat, self.alphabet_size))
+        
+        index_start = int(0)
+        for idx_pkt, idx_block in zip(
+            indexes_packet, indexes_block):
+            
+            idx_start = idx_block
+            idx_end = idx_block + self.look_back_packet
+            
+            # Set packet
+            pkt = self.packets[
+                idx_pkt, :int(self.headers_length[idx_pkt]*8)]
+            
+            pkt_seq_tmp = pkt[idx_start:idx_end] \
+                .reshape(-1, self.look_back_packet, 1)
+            
+            y_seq_tmp = pkt[idx_end]
+            y_seq_tmp = tf.keras.utils.to_categorical(
+                y=y_seq_tmp.ravel(), 
+                num_classes=self.alphabet_size, 
+                dtype='float64')
+            
+            # Set to packet sequence
+            pkt_seq[index_start:index_start+1, :, 0:1] = pkt_seq_tmp
+            pkt_seq[index_start:index_start+1, :, 1:] = self.sin_seq[
+                idx_start:idx_start+1]
+            y_seq[index_start:index_start+1] = y_seq_tmp
+            
+            index_start += 1
+            
+        return pkt_seq, y_seq
+
+    
+    def __data_generation(
+        self, indexes_packet, indexes_block):
+        'Generates data containing batch_size samples'      
+        # Initialization
+        ctx = self.__get_context(
+            indexes_packet)
+        
+        pkt, y = self.__get_packet(
+            indexes_packet, indexes_block) # On shuffle les packet et target
+        
+        # Correct context shape
+        ctx = ctx[:pkt.shape[0]]
+        
+        # On prend des bloque alétoire parmis les paquet
+        # pas forcement les blocks selectionné...
+        # Moins propre mais + simple...
+        indexes = np.arange(0, pkt.shape[0])\
+                    .astype(int)
+        
+        # Shuffle to avoid to always keep the last block non learned !
+        ctx = ctx[indexes]
+        pkt = pkt[indexes]
+        y = y[indexes]
+        
+        return ctx, pkt, y
+
+
+
+
+
+#############################################
+# LAUNCH TRAINING
+#############################################
+
+
+# PREPARE DATA
+
+
+
+
+# For checksum AND combinaison !
+# From : https://www.thegeekstuff.com/2012/05/ip-header-checksum/
+
+def sum_checksum(
+    array_bit_a, array_bit_b):
+    
+    # Array must have the same length
+    assert len(array_bit_a) == len(array_bit_b)
+    
+    # Sum of array
+    array_bit_sum = np.zeros(
+        (len(array_bit_a)), dtype=int)
+    
+    # For addition
+    carry = 0
+    
+    # For each bit
+    for i in reversed(range(len(array_bit_a))):
+        
+        # Get value
+        value_a = array_bit_a[i]
+        value_b = array_bit_b[i]
+        sum_value = value_a + value_b + carry
+        
+        # Apply sum
+        if (sum_value == 0):
+            carry = 0
+            array_bit_sum[i] = 0
+        elif (sum_value == 1):
+            carry = 0
+            array_bit_sum[i] = 1
+        elif (sum_value == 2):
+            carry = 1
+            array_bit_sum[i] = 0
+        elif (sum_value == 3):
+            carry = 1
+            array_bit_sum[i] = 1
+            
+    # If the result is above origianl length
+    if (carry):
+        array_bit_tmp = np.zeros(
+            (len(array_bit_a)), dtype=int)
+        array_bit_tmp[-1] = 1
+        array_bit_sum = sum_checksum(
+            array_bit_sum, array_bit_tmp)
+            
+    return array_bit_sum
+    
+
+def complement_chekcsum(array):
+    array_complement = \
+        (array - 1)*(-1)
+    return array_complement
+
+def checksum(array, size=8):
+    
+    # Check array size is above 
+    # checksum field size
+    assert array.size >= size
+    
+    # Reshape to good size
+    multiple = array.size / size
+    
+    # multiple == 1 therefore array.size = size
+    # So we add with 0 we need to pad
+    if ((array.size % size == 0) and 
+        (multiple != 1)):
+        array_reshape = \
+            array.reshape((-1, size))
+    else:
+        
+        # Compute coeff and get 
+        # missing bit
+        if (multiple == 1):
+            coeff = 2
+        else:
+            coeff = np.ceil(array.size / size)
+            
+        # Compute nb_bits
+        nb_bit = int(coeff*size - array.size)
+        
+        # Add zeros for padding
+        array_tmp = np.concatenate(
+            (array, np.zeros((nb_bit,)))) 
+
+        # Reshape array
+        array_reshape = \
+            array_tmp.reshape((-1, size))
+        
+    
+    # For each bytes
+    for i in range(
+        0, array_reshape.shape[0], 2):
+        
+        # Get first value
+        if (i == 0):
+            array_bit_a = array_reshape[i]
+            array_bit_b = array_reshape[i+1]
+        else:
+            array_bit_a = array_bit_sum
+            array_bit_b = array_reshape[i]
+        
+        # Apply sum
+        array_bit_sum = sum_checksum(
+            array_bit_a=array_bit_a, 
+            array_bit_b=array_bit_b)
+        
+    # Apply complement
+    array_bit_checksum = \
+        complement_chekcsum(
+            array=array_bit_sum)
+        
+    return array_bit_checksum
+
+
+## int_to_bin
+def int_to_bin(x, size=8):
+    val = str(bin(x))[2:]
+    s = len(val)
+    gap = size - s
+    
+    if (gap < 0):
+        raise "Error size limit too short"
+        #size = max(s, size)
+    
+    gap_val = '0'*gap
+    return gap_val+val
+
+
+
+# Generate with another seed ! (for evaluation)
+# "random", "checksum", "fixed", "inversion", "counter"
+
+if (MODE_DATASET == "random"):
+
+    # Reset the seed
+    np.random.seed(43)
+
+    arr_raw = \
+        np.random.randint(
+            0, 2, size=(NB_ROWS, NB_BITS))
+
+
+elif ("checksum" in MODE_DATASET):
+
+    # Reset the seed
+    np.random.seed(43)
+
+
+    if (MODE_DATASET == "checksum34"):
+        # Checksum over 3 bytes
+        CHECKSUM_LENGTH = 8
+        
+        # Create array of int
+        arr_raw = np.random.randint(
+            0, 2, 
+            size=(NB_ROWS, int(NB_BITS*(3/4))),
+            dtype=int)
+        
+    else:
+        # Checksum classic over 16 bits
+        CHECKSUM_LENGTH = 16
+        
+        # Create array of int
+        arr_raw = np.random.randint(
+            0, 2, 
+            size=(NB_ROWS, int(NB_BITS*(2/4))),
+            dtype=int)
+
+
+    # Compute checksum
+    arr_checksums = np.apply_along_axis(
+        checksum, axis=1, 
+        size=CHECKSUM_LENGTH,
+        arr=arr_raw)
+    arr_checksums = arr_checksums.astype(int)
+
+    # Concatenate array
+    arr_raw = np.concatenate(
+        (arr_raw, arr_checksums), 
+        axis=1)
+    arr_raw = arr_raw.astype(int)
+
+
+elif (MODE_DATASET == "fixed"):
+
+    arr_raw = \
+        np.ones((NB_ROWS, NB_BITS))
+    arr_raw = arr_raw * \
+        np.random.randint(
+            0, 2, size=(1, NB_BITS))
+
+
+elif (MODE_DATASET == "inversion"):
+
+    # Reset the seed
+    np.random.seed(43)
+
+    ## Define array
+    arr_raw = \
+        np.zeros((NB_ROWS, NB_BITS))
+
+    ## For each flow define random values
+
+    # For each flow
+    for i in range(
+        0, NB_ROWS, MAX_PACKET_RANK):
+        
+        arr_raw_tmp_a = \
+            np.random.randint(
+                0, 2, size=(1, int(NB_BITS/2)))
+        arr_raw_tmp_b = \
+            np.random.randint(
+                0, 2, size=(1, int(NB_BITS/2)))
+        
+        for j in range(MAX_PACKET_RANK):
+            
+            # Invert for next round
+            if (j % 2 == 0):
+                arr_raw_tmp = np.concatenate(
+                    (arr_raw_tmp_b, arr_raw_tmp_a), 
+                    axis=1)
+            else:
+                arr_raw_tmp = np.concatenate(
+                        (arr_raw_tmp_a, arr_raw_tmp_b), 
+                        axis=1)
+            
+            # Set to array
+            if (i+j < NB_ROWS):
+                arr_raw[i+j, :] = arr_raw_tmp
+
+
+elif (MODE_DATASET == "counter"):
+
+    # Reset the seed
+    np.random.seed(43)
+    
+    ## int_to_bin
+    def int_to_bin(x, size=8):
+        val = str(bin(x))[2:]
+        s = len(val)
+        gap = size - s
+        
+        if (gap < 0):
+            raise "Error size limit too short"
+            #size = max(s, size)
+        
+        gap_val = '0'*gap
+        return gap_val+val
+
+
+    ## Define array
+    arr_raw = \
+        np.zeros((NB_ROWS, NB_BITS))
+
+
+    # For each flow
+    for i in range(
+        0, NB_ROWS, 
+        MAX_PACKET_RANK):
+        
+        # Generate number
+        value = \
+            np.random.randint(
+                0, (2**NB_BITS)-MAX_PACKET_RANK, 
+                size=(1,))[0]
+        
+        # For each flow rank
+        for j in range(
+            MAX_PACKET_RANK):
+        
+            ## Convert number to binary
+            value_bin = int_to_bin(
+                value, size=NB_BITS)
+        
+            ## Create array from binary
+            ## values
+            value_bin_array = \
+                [int(bit) for bit in value_bin]
+            
+            # Set to array
+            if (i+j < NB_ROWS):
+                arr_raw[i+j, :] = value_bin_array
+            
+            # Add + 1
+            value = value + 1
+
+
+elif (MODE_DATASET == "fixed_flow"):
+
+    # Reset the seed
+    np.random.seed(43)
+
+    ## Define array
+    arr_raw = \
+        np.zeros((NB_ROWS, NB_BITS))
+
+
+    ## For each flow define random values
+
+    # For each flow
+    for i in range(
+        0, NB_ROWS, MAX_PACKET_RANK):
+
+        arr_raw_tmp = \
+            np.random.randint(
+                0, 2, size=(1, NB_BITS))
+
+        for j in range(MAX_PACKET_RANK):
+
+            # Set to array
+            if (i+j < NB_ROWS):
+                arr_raw[i+j, :] = arr_raw_tmp
+
+
+elif (MODE_DATASET == "combinaison"):
+
+
+    # Checksum over 3 bytes
+    CHECKSUM_LENGTH = 8
+
+    ## Define array
+    arr_raw = \
+        np.zeros((NB_ROWS, NB_BITS))
+
+    # Generate fixed values
+    arr_raw_fixed_tmp = \
+            np.random.randint(
+                0, 2, size=(1, int(NB_BITS/8)))
+
+    # Reset the seed AFTER SETTING
+    # fix values !
+    np.random.seed(43)
+
+    ## For each flow define random values
+
+    # For each flow
+    for i in range(
+        0, NB_ROWS, MAX_PACKET_RANK):
+
+        # Generate number for compteur
+        value = \
+            np.random.randint(
+                0, (2**int(NB_BITS/4))-MAX_PACKET_RANK, 
+                size=(1,))[0]
+
+        #arr_raw_cmp_tmp = \
+        #    np.random.randint(
+        #        0, 2, size=(1, int(NB_BITS/4)))
+
+        ## Generate fixed flow
+        arr_raw_fixed_flow_tmp = \
+            np.random.randint(
+                0, 2, size=(1, int(NB_BITS/8)))
+
+        for j in range(MAX_PACKET_RANK):
+
+            ## Convert number to binary
+            value_bin = int_to_bin(
+                    value, size=int(NB_BITS/4))
+
+            ## Create array from binary
+            ## values
+            value_bin_array = \
+                [int(bit) for bit in value_bin]
+            value_bin_array = \
+                np.array(value_bin_array)\
+                .reshape(-1, int(NB_BITS/4))
+
+            # Set to array
+            #if (i+j < NB_ROWS):
+            #    arr_raw[i+j, :] = value_bin_array        
+
+            # Generate random part
+            arr_raw_random_tmp = \
+                np.random.randint(
+                    0, 2, size=(1, int(NB_BITS/4)))
+
+            # Generate fixed et fixed flow
+
+            ## Concat fixed bytes
+            arr_raw_fixed_all_tmp = \
+                np.concatenate(
+                    (arr_raw_fixed_tmp, 
+                     arr_raw_fixed_flow_tmp), 
+                    axis=1)
+
+            # Invert for next round
+            if (j % 2 == 0):
+
+                # Apply concatenation
+                arr_raw_tmp = np.concatenate(
+                    (arr_raw_random_tmp, 
+                     arr_raw_fixed_all_tmp,
+                     value_bin_array, #arr_raw_cmp_tmp
+                    ), 
+                    axis=1)
+
+            else:
+
+                # Apply concatenation
+                arr_raw_tmp = np.concatenate(
+                    (value_bin_array, #arr_raw_cmp_tmp,
+                     arr_raw_fixed_all_tmp,
+                     arr_raw_random_tmp), 
+                    axis=1)
+
+            #print("[DEBUG] arr_raw_tmp.shape: ", 
+            #          arr_raw_tmp.shape)
+
+            # Compute checkusm
+            arr_raw_ckecksum_tmp = \
+                np.apply_along_axis(
+                    checksum, axis=1, 
+                    size=CHECKSUM_LENGTH,
+                    arr=arr_raw_tmp)
+
+            #print("[DEBUG] arr_raw_ckecksum_tmp.shape: ", 
+            #          arr_raw_ckecksum_tmp.shape)
+
+            # Concat all bytes
+            arr_raw_tmp = np.concatenate(
+                (arr_raw_tmp, 
+                 arr_raw_ckecksum_tmp), 
+                axis=1)
+
+            # Set to array
+            if (i+j < NB_ROWS):
+                arr_raw[i+j, :] = arr_raw_tmp
+
+            # Add + 1
+            value = value + 1
+
+    # Convert to int
+    arr_raw = arr_raw.astype(int)
+
+
+# Print two lines to see similarity or not 
+print("[DEBUG] arr_raw[:3]: ", arr_raw[:3])
+print("[DEBUG] arr_raw.shape: ", arr_raw.shape)
+
+
+# Add padding
+if (LEFT_PADDING):
+
+    arr_raw_padding = \
+        np.zeros((NB_ROWS, LOOK_BACK_PACKET))
+
+    arr_raw = np.concatenate(
+        (arr_raw_padding, arr_raw), 
+        axis=1)
+
+
+
+
+# DEFINE VARIABLES FOR GENERATOR
+
+
+
+
+## Set packet_rank
+packets_rank_tmp = np.arange(0, MAX_PACKET_RANK)
+packets_rank = \
+    np.repeat([packets_rank_tmp], 
+              int(NB_ROWS/MAX_PACKET_RANK), axis=0).ravel()
+
+## Set packets
+packets = arr_raw
+
+## Set headers 
+if (LEFT_PADDING):
+    headers_length = np.repeat(
+        [(NB_BITS+LOOK_BACK_PACKET) / 8], 
+        NB_ROWS, 
+        axis=0)
+else:
+    headers_length = np.repeat(
+        [NB_BITS/8], 
+        NB_ROWS, 
+        axis=0)
+
+## Set max length
+max_length = packets.shape[-1]
+
+# Define block length
+if (LEFT_PADDING):
+    block_length = np.repeat(
+        [NB_BITS], 
+        NB_ROWS, axis=0)
+else:
+    block_length = np.repeat(
+        [NB_BITS-LOOK_BACK_PACKET], 
+        NB_ROWS, axis=0)
+
+# Get the list of block
+cumsum_block = np.cumsum(
+    block_length)
+max_block = cumsum_block.max()
+
+# Set all indexes
+list_IDs = np.arange(
+    max_block, dtype=int)
+indexes_packet = np.repeat(
+    np.arange(0, block_length.size, dtype=int), 
+    block_length, axis=0)
+
+# Valuer du début de chaque bloc
+#  de chaque paquet
+cumsum_block_tmp = np.zeros(
+    cumsum_block.size, dtype=int)
+cumsum_block_tmp[1:] = cumsum_block[:-1]
+
+indexes_block = np.repeat(
+    cumsum_block_tmp, 
+    block_length, axis=0)
+indexes_block = list_IDs - indexes_block
+
+
+
+
+
+# WE TAKE NEW LIST ID WITH UNIQUE ELEMENT !
+
+
+
+
+print("[DEBUG] BEFORE list_IDs.shape: ", list_IDs.shape)
+print("[DEBUG] BEFORE indexes_packet.shape: ", indexes_packet.shape)
+print("[DEBUG] BEFORE indexes_block.shape: ", indexes_block.shape)
+
+
+# Get index for min and max element
+# idx_unique is ordonned !
+max_range = cumsum_block
+min_range = np.concatenate(
+    ([0], cumsum_block[:-1]))
+
+
+index_start = 0
+index_end = 0
+
+range_list_IDs = np.zeros(
+    (list_IDs.shape[0], 2))
+range_index_start = 0
+range_index_end = 0
+
+
+for idx_start, idx_end in zip(
+    min_range, max_range):
+    
+    # Update index
+    range_index_end = range_index_start + 1    
+    range_list_IDs[range_index_start:range_index_end] = [
+        list_IDs[idx_start], list_IDs[idx_end-1]+1] # [0, +inf[
+    range_index_start = range_index_end
+    
+    # Update index
+    block_size = (idx_end - idx_start)
+    #index_end = index_start + block_size
+
+    #index_start = index_end
+
+range_list_IDs = \
+    range_list_IDs[:range_index_end].astype(int)
+
+
+
+
+
+# CREATE GENERATOR
+
+
+
+
+
+# On shuffle pour etre sur que les adresses sont toutes couvertes
+# étape de CHECK COVERAGE ne devitn plus nécessaire
+list_IDs_test = list_IDs
+indexes_packet_test = indexes_packet
+indexes_block_test = indexes_block
+
+
+# Set parameters
+params = {'look_back_context': LOOK_BACK_CONTEXT,
+          'look_ahead_context': LOOK_AHEAD_CONTEXT, # Par default on ne sais qu'avec 1
+          'look_back_packet': LOOK_BACK_PACKET,
+          'look_ahead_packet': LOOK_AHEAD_PACKET, # Par default on ne sais qu'avec 1
+         
+          'packets_rank': packets_rank,
+          'packets': packets,
+          'headers_length': headers_length,
+          'max_length': max_length,
+         
+          'left_padding': LEFT_PADDING,
+          'batch_size': BATCH_SIZE,
+          'num_sin': NUM_SIN,
+          'alphabet_size': ALPHABET_SIZE, 
+          'shuffle': SHUFFLE}
+
+
+# Generators
+# Index = index de bloc de batch !
+# Example:
+# Si len(listID) = 264
+# alors index MAX = 132 si BATCH_SIZE = 2
+generator_test = DataGenerator(
+    list_IDs=list_IDs_test, 
+    indexes_packet=indexes_packet_test,
+    indexes_block=indexes_block_test,
+    **params)
+
+
+
+
+# LOAD MODEL
+
+
+
+
+# Name
+if (CHECKSUM):
+    if (CUSTOM_SIZE is not None):
+        EXT_NAME_MODEL = f"_WITH_CHECKSUM_CUSTOM_SIZE{CUSTOM_SIZE}_MODE_DATASET{MODE_DATASET}"
+    else:
+        EXT_NAME_MODEL = f"_WITH_CHECKSUM_EXTRA_SIZE{EXTRA_SIZE}_MODE_DATASET{MODE_DATASET}"
+
+else:
+    if (CUSTOM_SIZE is not None):
+        EXT_NAME_MODEL = f"_CUSTOM_SIZE{CUSTOM_SIZE}_MODE_DATASET{MODE_DATASET}"
+    else:
+        EXT_NAME_MODEL = f"_EXTRA_SIZE{EXTRA_SIZE}_MODE_DATASET{MODE_DATASET}"
+
+
+# If padding on dataset
+if (LEFT_PADDING):
+    EXT_NAME_MODEL += f"_LEFT_PADDING"
+
+
+encoder_context = tf.keras.models.load_model(f"{MODELS_DIR}ENCODER_CONTEXT_{FULL_NAME}{EXT_NAME_MODEL}.h5", 
+                                              custom_objects={"LeakyReLU": tf.keras.layers.LeakyReLU})
+ed_lossless = tf.keras.models.load_model(f"{MODELS_DIR}ED_{FULL_NAME}{EXT_NAME_MODEL}.h5", 
+                                          custom_objects={"LeakyReLU": tf.keras.layers.LeakyReLU})
+embedder = tf.keras.models.load_model(f"{MODELS_DIR}EMBEDDER_{FULL_NAME}{EXT_NAME_MODEL}.h5", 
+                                      custom_objects={"LeakyReLU": tf.keras.layers.LeakyReLU})
+model = CompressorLossless(encoder_context=encoder_context, 
+                           ed_lossless=ed_lossless)
+
+
+
+
+# START COMPRESSION
+
+
+
+
+gc.collect()
+df_results = compression(model=model,
+                          generator=generator_test, 
+                          packets=packets, 
+                          packets_rank=packets_rank,
+                          headers_length=headers_length, 
+                          max_length=max_length,
+                          range_list_IDs=range_list_IDs,
+                          look_back_context=LOOK_BACK_CONTEXT,
+                          look_ahead_context=LOOK_AHEAD_CONTEXT,
+                          look_back_packet=LOOK_BACK_PACKET,
+                          look_ahead_packet=LOOK_AHEAD_PACKET,
+                          num_sin=NUM_SIN,
+                          alphabet_size=ALPHABET_SIZE,
+                          left_padding=LEFT_PADDING)
+
+
+#df_results['idx_unique'] = idx_unique_test
+
+###############
+# SAVE RESULT
+###############
+
+df_results.to_csv(f"{RESULTS_DIR}df_{FULL_NAME}{EXT_NAME}.csv", index=False)
+
+end_time = datetime.datetime.now()
+
+print("TIME DIFF : ", end_time-start_time)

@@ -1,0 +1,4 @@
+#!/bin/bash
+
+sudo iw dev wlo1 interface add mon1 type monitor
+sudo ip link set mon1 up
