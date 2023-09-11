@@ -1,2 +1,0 @@
-# DCH
-Deep Compression Header
