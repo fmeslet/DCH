@@ -1,0 +1,10 @@
+size_decompress,size_compress,check_operation,headers_length,packets_rank
+40,37,True,40,0
+40,40,True,40,1
+40,39,False,40,2
+40,38,False,40,0
+40,38,False,40,1
+40,39,False,40,2
+40,39,True,40,0
+40,39,True,40,1
+40,40,True,40,2

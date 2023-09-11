@@ -736,7 +736,7 @@ def sum_checksum(
         array_bit_b (np.array): second array.
 
     Returns:
-        np.array: _description_
+        np.array: sum of the tw array at input.
     """
     
     # Array must have the same length
@@ -871,11 +871,12 @@ def int_to_bin(x, size=8):
     """Convert an integer into a binary value.
 
     Args:
-        x (np.array): _description_
-        size (int, optional): size of the integer in. Defaults to 8.
+        x (int): interger to convert.
+        size (int, optional): size of the binary list
+        in output. Defaults to 8.
 
     Returns:
-        _type_: _description_
+        list: list of binary value
     """
     val = str(bin(x))[2:]
     s = len(val)
@@ -987,6 +988,16 @@ elif (MODE_DATASET == "counter"):
     
     ## int_to_bin
     def int_to_bin(x, size=8):
+        """Convert an integer into a binary value.
+
+        Args:
+            x (int): interger to convert.
+            size (int, optional): size of the binary list
+            in output. Defaults to 8.
+
+        Returns:
+            list: list of binary value
+        """
         val = str(bin(x))[2:]
         s = len(val)
         gap = size - s
@@ -1246,8 +1257,8 @@ indexes_packet = np.repeat(
     np.arange(0, block_length.size, dtype=int), 
     block_length, axis=0)
 
-# Valuer du début de chaque bloc
-#  de chaque paquet
+# Value from the beginning of 
+# each block of each packet
 cumsum_block_tmp = np.zeros(
     cumsum_block.size, dtype=int)
 cumsum_block_tmp[1:] = cumsum_block[:-1]
@@ -1303,10 +1314,10 @@ params = {'look_back_context': LOOK_BACK_CONTEXT,
 
 
 # Generators
-# Index = index de bloc de batch !
+# Index = index of each bloc of batch !
 # Example:
-# Si len(listID) = 264
-# alors index MAX = 132 si BATCH_SIZE = 2
+# If len(listID) = 264
+# then index MAX = 132 if BATCH_SIZE = 2
 generator_train = DataGenerator(
     list_IDs=list_IDs_train, 
     indexes_packet=indexes_packet_train,

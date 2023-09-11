@@ -1197,6 +1197,15 @@ start_time = datetime.datetime.now()
 
 def sum_checksum(
     array_bit_a, array_bit_b):
+    """Sum two arrays of bits.
+
+    Args:
+        array_bit_a (np.array): first array.
+        array_bit_b (np.array): second array.
+
+    Returns:
+        np.array: sum of the tw array at input.
+    """
     
     # Array must have the same length
     assert len(array_bit_a) == len(array_bit_b)
@@ -1328,6 +1337,16 @@ def checksum(array, size=8):
 
 ## int_to_bin
 def int_to_bin(x, size=8):
+    """Convert an integer into a binary value.
+
+    Args:
+        x (int): interger to convert.
+        size (int, optional): size of the binary list
+        in output. Defaults to 8.
+
+    Returns:
+        list: list of binary value
+    """
     val = str(bin(x))[2:]
     s = len(val)
     gap = size - s
@@ -1450,6 +1469,16 @@ elif (MODE_DATASET == "counter"):
     
     ## int_to_bin
     def int_to_bin(x, size=8):
+        """Convert an integer into a binary value.
+
+        Args:
+            x (int): interger to convert.
+            size (int, optional): size of the binary list
+            in output. Defaults to 8.
+
+        Returns:
+            list: list of binary value
+        """
         val = str(bin(x))[2:]
         s = len(val)
         gap = size - s
@@ -1717,8 +1746,8 @@ indexes_packet = np.repeat(
     np.arange(0, block_length.size, dtype=int), 
     block_length, axis=0)
 
-# Valuer du début de chaque bloc
-#  de chaque paquet
+# Value from the beginning of 
+# each block of each packet
 cumsum_block_tmp = np.zeros(
     cumsum_block.size, dtype=int)
 cumsum_block_tmp[1:] = cumsum_block[:-1]
@@ -1800,8 +1829,8 @@ range_list_IDs = \
 
 
 
-# On shuffle pour etre sur que les adresses sont toutes couvertes
-# étape de CHECK COVERAGE ne devitn plus nécessaire
+# Shuffle to make sure all addresses are covered
+# CHECK COVERAGE step no longer necessary
 list_IDs_test = list_IDs
 indexes_packet_test = indexes_packet
 indexes_block_test = indexes_block
@@ -1809,9 +1838,9 @@ indexes_block_test = indexes_block
 
 # Set parameters
 params = {'look_back_context': LOOK_BACK_CONTEXT,
-          'look_ahead_context': LOOK_AHEAD_CONTEXT, # Par default on ne sais qu'avec 1
+          'look_ahead_context': LOOK_AHEAD_CONTEXT,
           'look_back_packet': LOOK_BACK_PACKET,
-          'look_ahead_packet': LOOK_AHEAD_PACKET, # Par default on ne sais qu'avec 1
+          'look_ahead_packet': LOOK_AHEAD_PACKET,
          
           'packets_rank': packets_rank,
           'packets': packets,
@@ -1826,10 +1855,10 @@ params = {'look_back_context': LOOK_BACK_CONTEXT,
 
 
 # Generators
-# Index = index de bloc de batch !
+# Index = index of each bloc of batch !
 # Example:
-# Si len(listID) = 264
-# alors index MAX = 132 si BATCH_SIZE = 2
+# If len(listID) = 264
+# then index MAX = 132 if BATCH_SIZE = 2
 generator_test = DataGeneratorContinuous(
     list_IDs=list_IDs_test, 
     indexes_packet=indexes_packet_test,
@@ -1882,6 +1911,16 @@ array_index_pos = np.load(f"{HUFFMAN_DIR}arr_index_pos_HUFFMAN_{FULL_NAME}{EXT_N
 
 # CHANGE DATAFRAME FORMAT 
 def my_func(x, max_length=8):
+    """Change value from int to binary string.
+
+    Args:
+        x (int): binary number set as integer.
+        max_length (int, optional): maximum size of 
+        binary string. Defaults to 8.
+
+    Returns:
+        str: string of binary value.
+    """
     value = str(x)
     length = len(value)
     value_extend = "0"*(max_length-length)

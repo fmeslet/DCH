@@ -1121,11 +1121,11 @@ nb_equipment = df_raw.iloc[
 
 # Check that the number of equipment items is covered
 if (nb_equipment < nb_device_address):
-    print("[DEBUG][WARNING !] Le nombre d'équiment choisi n'est pas présent !")
+    print("[DEBUG][WARNING !] The selected number of equiment is not present !")
     raise Exception
     
 if (nb_equipment < NB_EQUIP_LIMIT):
-    print("[DEBUG][WARNING !] Le nombre d'équiment choisi est inférieur à NB_EQUIP_MAX !")
+    print("[DEBUG][WARNING !] The number of equiment selected is less than NB_EQUIP_MAX !")
     raise Exception
 
 
@@ -1164,8 +1164,8 @@ indexes_packet = np.repeat(
     np.arange(0, block_length.size, dtype=int), 
     block_length, axis=0)
 
-# Valuer du début de chaque bloc
-#  de chaque paquet
+# Value from the beginning of 
+# each block of each packet
 cumsum_block_tmp = np.zeros(
     cumsum_block.size, dtype=int)
 cumsum_block_tmp[1:] = cumsum_block[:-1]
@@ -1245,8 +1245,8 @@ print("[DEBUG] AFTER indexes_block_update.shape: ", indexes_block_update.shape)
 
 
 
-# On shuffle pour etre sur que les adresses sont toutes couvertes
-# étape de CHECK COVERAGE ne devitn plus nécessaire
+# Shuffle to make sure all addresses are covered 
+# CHECK COVERAGE step no longer necessary
 
 idx = np.arange(0, list_IDs_update.size, dtype=int)
 train_idx, val_idx, _, _ = sklearn.model_selection.train_test_split(
@@ -1283,10 +1283,10 @@ params = {'look_back_context': LOOK_BACK_CONTEXT,
 
 
 # Generators
-# Index = index de bloc de batch !
+# Index = index of each bloc of batch !
 # Example:
-# Si len(listID) = 264
-# alors index MAX = 132 si BATCH_SIZE = 2
+# If len(listID) = 264
+# then index MAX = 132 if BATCH_SIZE = 2
 generator_train = DataGenerator(
     list_IDs=list_IDs_update_train, 
     indexes_packet=indexes_packet_update_train,

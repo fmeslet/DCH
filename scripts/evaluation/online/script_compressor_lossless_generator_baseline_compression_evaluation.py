@@ -1765,11 +1765,11 @@ nb_equipment = df_raw.iloc[
 
 # Check that the number of equipment items is covered
 if (nb_equipment < nb_device_address):
-    print("[DEBUG][WARNING !] Le nombre d'équiment choisi n'est pas présent !")
+    print("[DEBUG][WARNING !] The selected number of equiment is not present !")
     raise Exception
     
 if (nb_equipment < NB_EQUIP_LIMIT):
-    print("[DEBUG][WARNING !] Le nombre d'équiment choisi est inférieur à NB_EQUIP_MAX !")
+    print("[DEBUG][WARNING !] The number of equiment selected is less than NB_EQUIP_MAX !")
     raise Exception
 
 
@@ -2005,6 +2005,16 @@ else:
 
 # CHANGE DATAFRAME FORMAT 
 def my_func(x, max_length=8):
+    """Change value from int to binary string.
+
+    Args:
+        x (int): binary number set as integer.
+        max_length (int, optional): maximum size of 
+        binary string. Defaults to 8.
+
+    Returns:
+        str: string of binary value.
+    """
     value = str(x)
     length = len(value)
     value_extend = "0"*(max_length-length)

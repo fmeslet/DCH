@@ -7,7 +7,7 @@ DCH: A Deep Learning Approach To Universal Header Compression For The Internet o
 Summary
 ------------
 
-DCH (Deep Compression Header) is a Deep Learning architecture used to compress network packet from network traffic. The model can learn to compress any packet without knowing the structure of its protocol. Thanks to a step of model transformation, DCH is embeddable on an IoT (Arduino) device. This work is published in `Conference name year <https://>`.
+DCH (Deep Compression Header) is a Deep Learning architecture used to compress network packet from network traffic. The model can learn to compress any packet without knowing the structure of its protocol. Thanks to a step of model transformation, DCH is embeddable on an IoT (Arduino) device. This work is published in `MSWIM 2023 <https://>`.
 
 
 

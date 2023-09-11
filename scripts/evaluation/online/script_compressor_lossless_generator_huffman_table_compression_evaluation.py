@@ -1994,6 +1994,16 @@ array_index_pos = np.load(f"{HUFFMAN_DIR}arr_index_pos_HUFFMAN_{FULL_NAME}{EXT_N
 
 # CHANGE DATAFRAME FORMAT 
 def my_func(x, max_length=8):
+    """Change value from int to binary string.
+
+    Args:
+        x (int): binary number set as integer.
+        max_length (int, optional): maximum size of 
+        binary string. Defaults to 8.
+
+    Returns:
+        str: string of binary value.
+    """
     value = str(x)
     length = len(value)
     value_extend = "0"*(max_length-length)

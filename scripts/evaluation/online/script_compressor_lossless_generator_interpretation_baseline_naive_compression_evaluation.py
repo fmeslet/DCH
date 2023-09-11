@@ -1192,6 +1192,15 @@ start_time = datetime.datetime.now()
 
 def sum_checksum(
     array_bit_a, array_bit_b):
+    """Sum two arrays of bits.
+
+    Args:
+        array_bit_a (np.array): first array.
+        array_bit_b (np.array): second array.
+
+    Returns:
+        np.array: sum of the tw array at input.
+    """
     
     # Array must have the same length
     assert len(array_bit_a) == len(array_bit_b)
@@ -1237,11 +1246,29 @@ def sum_checksum(
     
 
 def complement_chekcsum(array):
+    """Compute the complement.
+
+    Args:
+        array (np.array): array of bit.
+
+    Returns:
+        np.array: Complement of the array.
+    """
     array_complement = \
         (array - 1)*(-1)
     return array_complement
 
 def checksum(array, size=8):
+    """Compute the checksum.
+
+    Args:
+        array (np.array): array of bit.
+        size (int, optional): size of the checksum 
+        field. Defaults to 8.
+
+    Returns:
+        np.array: array of bit.
+    """
     
     # Check array size is above 
     # checksum field size
@@ -1305,6 +1332,16 @@ def checksum(array, size=8):
 
 ## int_to_bin
 def int_to_bin(x, size=8):
+    """Change value from int to binary string.
+
+    Args:
+        x (int): binary number set as integer.
+        max_length (int, optional): maximum size of 
+        binary string. Defaults to 8.
+
+    Returns:
+        str: string of binary value.
+    """
     val = str(bin(x))[2:]
     s = len(val)
     gap = size - s
@@ -1695,8 +1732,8 @@ indexes_packet = np.repeat(
     np.arange(0, block_length.size, dtype=int), 
     block_length, axis=0)
 
-# Valuer du début de chaque bloc
-#  de chaque paquet
+# Value from the beginning of 
+# each block of each packet
 cumsum_block_tmp = np.zeros(
     cumsum_block.size, dtype=int)
 cumsum_block_tmp[1:] = cumsum_block[:-1]
@@ -1849,6 +1886,16 @@ cut_value = LOOK_BACK_PACKET
 
 # CHANGE DATAFRAME FORMAT 
 def my_func(x, max_length=8):
+    """Change value from int to binary string.
+
+    Args:
+        x (int): binary number set as integer.
+        max_length (int, optional): maximum size of 
+        binary string. Defaults to 8.
+
+    Returns:
+        str: string of binary value.
+    """
     value = str(x)
     length = len(value)
     value_extend = "0"*(max_length-length)
